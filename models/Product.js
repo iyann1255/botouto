@@ -10,7 +10,10 @@ const ProductSchema = new mongoose.Schema(
     active: { type: Boolean, default: true },
 
     // orderkuota/pakasir/qiospay/saldo/manual
-    provider: { type: String, default: "orderkuota" }
+    provider: { type: String, default: "orderkuota" },
+
+    // untuk item telegram (ubot/prem/start/jasa)
+    isDigital: { type: Boolean, default: false }
   },
   { timestamps: true }
 );
