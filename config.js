@@ -31,6 +31,8 @@ const CFG = {
 
   PAKASIR_PROJECT_SLUG: process.env.PAKASIR_PROJECT_SLUG?.trim() || "",
   PAKASIR_API_KEY: process.env.PAKASIR_API_KEY?.trim() || "",
+  PAKASIR_WEBHOOK_TOKEN: process.env.PAKASIR_WEBHOOK_TOKEN?.trim() || "",
+
 
   ORDERKUOTA_AUTH_USERNAME: process.env.ORDERKUOTA_AUTH_USERNAME?.trim() || "",
   ORDERKUOTA_AUTH_TOKEN: process.env.ORDERKUOTA_AUTH_TOKEN?.trim() || "",
