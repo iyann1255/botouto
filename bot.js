@@ -112,7 +112,8 @@ async function listProductsText(limit = 50) {
 
   let out = "📦 *Daftar Produk*\n\n";
   for (const p of items) {
-    out += `• *${p.name}*\n  - Code: \`${p.code}\`\n  - Harga: *${money(p.price)}*\n  - Kategori: ${p.category}\n\n`;
+    const digitalTag = p.isDigital ? " (digital)" : "";
+    out += `• *${p.name}*${digitalTag}\n  - Code: \`${p.code}\`\n  - Harga: *${money(p.price)}*\n  - Kategori: ${p.category}\n\n`;
   }
   out += "Untuk order: klik *Order* lalu pilih produk.";
   return out;
@@ -122,9 +123,22 @@ async function buildProductKeyboard() {
   const items = await Product.find({ active: true }).sort({ category: 1, price: 1 }).limit(20);
   if (!items.length) return null;
 
-  const rows = items.map((p) => [Markup.button.callback(`${p.name} (${money(p.price)})`, `PICK_${p.code}`)]);
+  const rows = items.map((p) => {
+    const tag = p.isDigital ? " • digital" : "";
+    return [Markup.button.callback(`${p.name}${tag} (${money(p.price)})`, `PICK_${p.code}`)];
+  });
   rows.push([Markup.button.callback("⬅️ Kembali", "BACK_MENU")]);
   return Markup.inlineKeyboard(rows);
+}
+
+async function notifyAdmins(text, extra) {
+  for (const adminId of CFG.ADMIN_IDS) {
+    try {
+      await bot.telegram.sendMessage(adminId, text, extra);
+    } catch (e) {
+      // ignore
+    }
+  }
 }
 
 // ----------------- BOT Commands -----------------
@@ -179,16 +193,16 @@ bot.command("addsaldo", async (ctx) => {
   ctx.reply(`OK. Saldo user ${uid} +${money(amt)}`);
 });
 
-// Admin: add product
+// Admin: add product (support digital flag)
 bot.command("addproduct", async (ctx) => {
   const tgId = ctx.from.id;
   if (!isAdmin(tgId)) return ctx.reply("Kamu bukan admin.");
 
-  // /addproduct CODE | Nama Produk | kategori | harga | provider(optional)
+  // /addproduct CODE | Nama Produk | kategori | harga | provider(optional) | digital(optional)
   const raw = ctx.message.text.replace(/^\/addproduct\s*/i, "");
   const parts = raw.split("|").map((x) => x.trim());
   if (parts.length < 4) {
-    return ctx.reply("Format:\n/addproduct CODE | Nama | kategori | harga | provider(optional)");
+    return ctx.reply("Format:\n/addproduct CODE | Nama | kategori | harga | provider(optional) | digital(optional)");
   }
 
   const code = parts[0].toUpperCase();
@@ -196,16 +210,19 @@ bot.command("addproduct", async (ctx) => {
   const category = parts[2] || "pulsa";
   const price = Number(parts[3]);
   const provider = (parts[4] || "orderkuota").toLowerCase();
+  const isDigital = (parts[5] || "").toLowerCase() === "digital";
 
   if (!code || !name || !Number.isFinite(price)) return ctx.reply("Input tidak valid.");
 
   await Product.updateOne(
     { code },
-    { $set: { code, name, category, price, provider, active: true } },
+    { $set: { code, name, category, price, provider, isDigital, active: true } },
     { upsert: true }
   );
 
-  ctx.reply(`OK. Produk tersimpan:\n${name}\nCode: ${code}\nHarga: ${money(price)}\nProvider: ${provider}`);
+  ctx.reply(
+    `OK. Produk tersimpan:\n${name}\nCode: ${code}\nHarga: ${money(price)}\nProvider: ${provider}\nDigital: ${isDigital ? "YES" : "NO"}`
+  );
 });
 
 // Admin: add voucher
@@ -217,7 +234,9 @@ bot.command("addvoucher", async (ctx) => {
   const raw = ctx.message.text.replace(/^\/addvoucher\s*/i, "");
   const parts = raw.split("|").map((x) => x.trim());
   if (parts.length < 3) {
-    return ctx.reply("Format:\n/addvoucher CODE | PERCENT/FLAT | value | minAmount(optional) | maxDiscount(optional) | usageLimit(optional)");
+    return ctx.reply(
+      "Format:\n/addvoucher CODE | PERCENT/FLAT | value | minAmount(optional) | maxDiscount(optional) | usageLimit(optional)"
+    );
   }
 
   const code = parts[0].toUpperCase();
@@ -240,12 +259,79 @@ bot.command("addvoucher", async (ctx) => {
   ctx.reply(`OK. Voucher tersimpan:\nCode: ${code}\nType: ${type}\nValue: ${value}`);
 });
 
+// Admin: list pending/review
+bot.command("listpending", async (ctx) => {
+  const tgId = ctx.from.id;
+  if (!isAdmin(tgId)) return ctx.reply("Kamu bukan admin.");
+
+  const items = await Transaction.find({ status: { $in: ["REVIEW", "PAID"] } })
+    .sort({ createdAt: -1 })
+    .limit(20);
+
+  if (!items.length) return ctx.reply("Tidak ada transaksi pending/review.");
+
+  let out = "🧾 Pending/Review (20 terakhir)\n\n";
+  for (const t of items) {
+    out += `• ${t.trxId} | ${t.status}\n  ${t.productName} → ${t.target}\n  ${money(t.amount)}\n\n`;
+  }
+  return ctx.reply(out);
+});
+
+// Admin: proses trx -> SUCCESS
+bot.command("proses", async (ctx) => {
+  const tgId = ctx.from.id;
+  if (!isAdmin(tgId)) return ctx.reply("Kamu bukan admin.");
+
+  const parts = ctx.message.text.split(" ").map((x) => x.trim()).filter(Boolean);
+  if (parts.length < 2) return ctx.reply("Format: /proses <trxId>");
+
+  const trxId = parts[1].toUpperCase();
+  const trx = await Transaction.findOne({ trxId });
+  if (!trx) return ctx.reply("Trx tidak ditemukan.");
+
+  trx.status = "SUCCESS";
+  await trx.save();
+
+  await ctx.reply(`OK. Trx ${trxId} diset SUCCESS.`);
+
+  try {
+    await bot.telegram.sendMessage(
+      trx.tgId,
+      `✅ Pesanan selesai\n\nProduk: ${trx.productName}\nTarget: ${trx.target}\nTrx: ${trx.trxId}\nStatus: SUCCESS`
+    );
+  } catch {}
+});
+
 // ----------------- Callback menu -----------------
 bot.on("callback_query", async (ctx) => {
   const data = ctx.callbackQuery.data;
   const tgId = ctx.from.id;
 
   try {
+    // admin quick done button
+    if (data.startsWith("ADMIN_DONE_")) {
+      if (!isAdmin(tgId)) return ctx.answerCbQuery("Bukan admin.");
+      const trxId = data.replace("ADMIN_DONE_", "");
+      const trx = await Transaction.findOne({ trxId });
+      if (!trx) return ctx.answerCbQuery("Trx tidak ditemukan.");
+
+      trx.status = "SUCCESS";
+      await trx.save();
+
+      await ctx.editMessageText(
+        `✅ DONE: ${trxId}\n${trx.productName}\nTarget: ${trx.target}\n${money(trx.amount)}`
+      );
+
+      try {
+        await bot.telegram.sendMessage(
+          trx.tgId,
+          `✅ Pesanan selesai\n\nProduk: ${trx.productName}\nTarget: ${trx.target}\nTrx: ${trx.trxId}\nStatus: SUCCESS`
+        );
+      } catch {}
+
+      return;
+    }
+
     if (data === "BACK_MENU") {
       await resetState(tgId);
       await ctx.editMessageText("Menu:", mainMenu());
@@ -299,8 +385,13 @@ bot.on("callback_query", async (ctx) => {
       if (!p) return ctx.answerCbQuery("Produk tidak ditemukan.");
 
       await setState(tgId, "ORDER_INPUT", { productCode: p.code });
+
+      const hint = p.isDigital
+        ? "Sekarang kirim *target* (contoh: @username / user_id / link grup/channel)."
+        : "Sekarang kirim *target* (nomor / id tujuan).";
+
       await ctx.editMessageText(
-        `Produk dipilih: *${p.name}*\nHarga: *${money(p.price)}*\n\nSekarang kirim *target* (nomor / id tujuan).\n\nKalau pakai voucher: contoh\n\`0812xxxx VOUCHER:DISKON10\``,
+        `Produk dipilih: *${p.name}*\nHarga: *${money(p.price)}*\n\n${hint}\n\nKalau pakai voucher: contoh\n\`0812xxxx VOUCHER:DISKON10\``,
         { parse_mode: "Markdown", ...Markup.inlineKeyboard([[Markup.button.callback("⬅️ Batal", "BACK_MENU")]]) }
       );
       return;
@@ -311,8 +402,10 @@ bot.on("callback_query", async (ctx) => {
       await ctx.editMessageText(
         "Admin menu:\n" +
           "• /addsaldo <userId> <amount>\n" +
-          "• /addproduct CODE | Nama | kategori | harga | provider\n" +
-          "• /addvoucher CODE | PERCENT/FLAT | value | minAmount | maxDiscount | usageLimit\n",
+          "• /addproduct CODE | Nama | kategori | harga | provider | digital(optional)\n" +
+          "• /addvoucher CODE | PERCENT/FLAT | value | minAmount | maxDiscount | usageLimit\n" +
+          "• /listpending\n" +
+          "• /proses <trxId>\n",
         mainMenu()
       );
       return;
@@ -346,7 +439,10 @@ bot.on("text", async (ctx) => {
     await resetState(tgId);
 
     if (!v) return ctx.reply("Voucher tidak valid / nonaktif.", mainMenu());
-    return ctx.reply(`Voucher *${code}* terdeteksi. Pakai saat order: \`VOUCHER:${code}\``, { parse_mode: "Markdown", ...mainMenu() });
+    return ctx.reply(`Voucher *${code}* terdeteksi. Pakai saat order: \`VOUCHER:${code}\``, {
+      parse_mode: "Markdown",
+      ...mainMenu()
+    });
   }
 
   // Order input
@@ -401,7 +497,10 @@ bot.on("text", async (ctx) => {
       if ((freshUser?.balance || 0) < finalAmount) {
         trx.status = "FAILED";
         await trx.save();
-        return ctx.reply(`Saldo kurang.\nButuh ${money(finalAmount)} tapi saldo kamu ${money(freshUser?.balance || 0)}.`, mainMenu());
+        return ctx.reply(
+          `Saldo kurang.\nButuh ${money(finalAmount)} tapi saldo kamu ${money(freshUser?.balance || 0)}.`,
+          mainMenu()
+        );
       }
 
       await User.updateOne({ tgId }, { $inc: { balance: -finalAmount } });
@@ -411,7 +510,6 @@ bot.on("text", async (ctx) => {
 
       await ctx.reply(`Pembayaran via saldo OK.\nTrx: *${trxId}*\nStatus: *PAID*`, { parse_mode: "Markdown" });
 
-      // process order to provider if orderkuota enabled and provider is orderkuota
       if (orderkuota && p.provider === "orderkuota") {
         trx.status = "PROCESSING";
         await trx.save();
@@ -421,32 +519,39 @@ bot.on("text", async (ctx) => {
           trx.raw = resp;
           trx.status = "SUCCESS";
           await trx.save();
-          return ctx.reply(`Order diproses.\nTrx: *${trxId}*\nStatus: *SUCCESS*`, { parse_mode: "Markdown", ...mainMenu() });
+          return ctx.reply(`Order diproses.\nTrx: *${trxId}*\nStatus: *SUCCESS*`, {
+            parse_mode: "Markdown",
+            ...mainMenu()
+          });
         } catch (e) {
           trx.status = "REVIEW";
           trx.raw = { error: String(e?.message || e) };
           await trx.save();
-          return ctx.reply(`Order gagal otomatis. Masuk *REVIEW*.\nTrx: *${trxId}*`, { parse_mode: "Markdown", ...mainMenu() });
+          return ctx.reply(`Order gagal otomatis. Masuk *REVIEW*.\nTrx: *${trxId}*`, {
+            parse_mode: "Markdown",
+            ...mainMenu()
+          });
         }
       }
 
-      // mark voucher used
       if (voucher) {
         await User.updateOne({ tgId }, { $addToSet: { redeemedVouchers: voucher.code } });
         await Voucher.updateOne({ code: voucher.code }, { $inc: { usedCount: 1 } });
       }
 
-      return ctx.reply(`Trx dibuat: *${trxId}*\nStatus: *PAID*\nProvider: ${p.provider}`, { parse_mode: "Markdown", ...mainMenu() });
+      return ctx.reply(`Trx dibuat: *${trxId}*\nStatus: *PAID*\nProvider: ${p.provider}`, {
+        parse_mode: "Markdown",
+        ...mainMenu()
+      });
     }
 
-    // Non-saldo payment: placeholder invoice (implement gateway later)
+    // Non-saldo payment
     let payInfo =
       `🧾 Transaksi dibuat\n\n` +
       `Trx: *${trxId}*\nProduk: *${p.name}*\nTarget: \`${cleanTarget}\`\n` +
       `Harga: ${money(baseAmount)}\nDiskon: ${money(discount)}\nFee: ${money(fee)}\nTotal: *${money(finalAmount)}*\n\n` +
       `Status: *PENDING*\nGateway: *${p.provider}*\n`;
 
-    // optional: create invoice stub for Pakasir/Qiospay (placeholder)
     try {
       if (p.provider === "pakasir" && pakasir) {
         const inv = await pakasir.createInvoice({
@@ -479,7 +584,6 @@ bot.on("text", async (ctx) => {
       payInfo += `\n\nGateway error, transaksi masuk *REVIEW*.`;
     }
 
-    // mark voucher used (when trx created)
     if (voucher) {
       await User.updateOne({ tgId }, { $addToSet: { redeemedVouchers: voucher.code } });
       await Voucher.updateOne({ code: voucher.code }, { $inc: { usedCount: 1 } });
@@ -489,11 +593,95 @@ bot.on("text", async (ctx) => {
   }
 });
 
-// ----------------- WEB ADMIN (monitor/report) -----------------
+// ----------------- WEB ADMIN (monitor/report + callback) -----------------
 async function startWeb() {
   const app = express();
   app.use(express.json());
   app.use(express.static(path.join(__dirname, "public")));
+
+  // callback pakasir
+  app.post("/callback/pakasir", async (req, res) => {
+    try {
+      // optional header token protection
+      // add to .env: PAKASIR_WEBHOOK_TOKEN=xxx
+      if (CFG.PAKASIR_WEBHOOK_TOKEN) {
+        const token = req.headers["x-callback-token"] || req.headers["x-webhook-token"] || "";
+        if (String(token) !== String(CFG.PAKASIR_WEBHOOK_TOKEN)) {
+          return res.status(401).json({ ok: false, message: "Unauthorized" });
+        }
+      }
+
+      const body = req.body || {};
+
+      const trxId = String(
+        body.external_id ||
+          body.externalId ||
+          body.order_id ||
+          body.orderId ||
+          body.ref_id ||
+          body.refId ||
+          body.reference ||
+          ""
+      ).toUpperCase();
+
+      if (!trxId) return res.status(400).json({ ok: false, message: "Missing external_id/ref" });
+
+      const trx = await Transaction.findOne({ trxId });
+      if (!trx) return res.status(404).json({ ok: false, message: "Trx not found" });
+
+      const rawStatus = String(body.status || body.invoice_status || body.state || "").toUpperCase();
+
+      const isPaid =
+        ["PAID", "SUCCESS", "COMPLETED", "SETTLED"].includes(rawStatus) ||
+        body.paid === true ||
+        body.is_paid === true;
+
+      const isFailed =
+        ["FAILED", "CANCELED", "CANCELLED", "EXPIRED"].includes(rawStatus) ||
+        body.failed === true;
+
+      trx.raw = body;
+      trx.gateway = "pakasir";
+      trx.gatewayRef = String(body.invoice_id || body.invoiceId || trx.gatewayRef || "");
+
+      if (isFailed) {
+        trx.status = "FAILED";
+        await trx.save();
+        return res.json({ ok: true });
+      }
+
+      if (isPaid) {
+        trx.status = "PAID";
+        await trx.save();
+
+        // digital items -> REVIEW + notif admin
+        const prod = await Product.findOne({ code: trx.productCode });
+        if (prod?.isDigital) {
+          trx.status = "REVIEW";
+          await trx.save();
+
+          await notifyAdmins(
+            `🧾 DIGITAL PAID → REVIEW\n\nTrx: ${trx.trxId}\nProduk: ${trx.productName}\nTarget: ${trx.target}\nTotal: ${money(trx.amount)}`,
+            Markup.inlineKeyboard([[Markup.button.callback("✅ Proses", `ADMIN_DONE_${trx.trxId}`)]])
+          );
+
+          try {
+            await bot.telegram.sendMessage(
+              trx.tgId,
+              `✅ Pembayaran diterima\n\nProduk: ${trx.productName}\nTrx: ${trx.trxId}\nStatus: REVIEW (diproses admin)`
+            );
+          } catch {}
+        }
+
+        return res.json({ ok: true });
+      }
+
+      return res.json({ ok: true, message: "Ignored status" });
+    } catch (e) {
+      logger.error({ e }, "callback pakasir error");
+      return res.status(500).json({ ok: false });
+    }
+  });
 
   app.get("/api/health", async (req, res) => {
     const report = await healthReport({
@@ -578,12 +766,13 @@ async function startWeb() {
         category: "pulsa",
         price: 10000,
         provider: "saldo",
+        isDigital: false,
         active: true
       });
       logger.info("Seed sample product created: TEST10");
     }
 
-    await startWeb(); // monitoring + report
+    await startWeb(); // monitoring + report + callback
     await bot.launch();
     logger.info("BOT-AUTO started.");
   } catch (e) {
