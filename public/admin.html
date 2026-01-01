@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BOT-AUTO Admin</title>
+  <style>
+    body { font-family: system-ui, Arial; background:#0b0b0f; color:#fff; margin:0; }
+    .wrap { max-width: 1100px; margin: 24px auto; padding: 16px; }
+    .card { background:#141420; border:1px solid #26263a; border-radius:14px; padding:16px; margin-bottom:12px; }
+    input, button { padding:10px 12px; border-radius:10px; border:1px solid #333; background:#0f0f16; color:#fff; }
+    button { cursor:pointer; }
+    pre { background:#0f0f16; padding:12px; border-radius:12px; overflow:auto; }
+    .muted { color:#b7b7c9; font-size:12px; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { padding:10px; border-bottom:1px solid #1f1f2e; }
+    th { border-bottom:1px solid #26263a; text-align:left; }
+    .right { text-align:right; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>BOT-AUTO Admin Panel</h2>
+    <p class="muted">Monitoring + laporan produk terjual. Bot Telegram tetap jalan seperti biasa.</p>
+
+    <div class="card">
+      <h3>Health</h3>
+      <button onclick="loadHealth()">Refresh</button>
+      <pre id="health">-</pre>
+    </div>
+
+    <div class="card">
+      <h3>Products</h3>
+      <button onclick="loadProducts()">Load</button>
+      <pre id="products">-</pre>
+    </div>
+
+    <div class="card">
+      <h3>Report Produk (Jumlah dibeli & Revenue)</h3>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <span class="muted">Range hari:</span>
+        <input id="days" value="30" style="width:90px;" />
+        <button onclick="loadReport()">Load</button>
+      </div>
+      <div id="reportTable" style="margin-top:12px;"></div>
+    </div>
+
+  </div>
+
+<script>
+async function loadHealth(){
+  const res = await fetch("/api/health");
+  document.getElementById("health").textContent = await res.text();
+}
+
+async function loadProducts(){
+  const res = await fetch("/api/products");
+  document.getElementById("products").textContent = await res.text();
+}
+
+function rupiah(n){
+  try { return "Rp " + Number(n||0).toLocaleString("id-ID"); }
+  catch { return String(n); }
+}
+
+async function loadReport(){
+  const days = document.getElementById("days").value || "30";
+  const res = await fetch(`/api/report/products?days=${encodeURIComponent(days)}`);
+  const data = await res.json();
+
+  const rows = data.rows || [];
+  if (!rows.length){
+    document.getElementById("reportTable").innerHTML = "<div class='muted'>Belum ada transaksi di range ini.</div>";
+    return;
+  }
+
+  let html = `
+    <div class="muted">Range: ${data.range_days} hari</div>
+    <div style="overflow:auto; margin-top:10px;">
+      <table>
+        <thead>
+          <tr>
+            <th>Produk</th>
+            <th class="right">Total</th>
+            <th class="right">Success</th>
+            <th class="right">Pending</th>
+            <th class="right">Review</th>
+            <th class="right">Revenue (Success)</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  for (const r of rows){
+    html += `
+      <tr>
+        <td>
+          <div><b>${(r.productName || "-")}</b></div>
+          <div class="muted">Code: ${r.productCode || "-"}</div>
+        </td>
+        <td class="right">${r.totalTrx}</td>
+        <td class="right">${r.successTrx}</td>
+        <td class="right">${r.pendingTrx}</td>
+        <td class="right">${r.reviewTrx}</td>
+        <td class="right">${rupiah(r.revenueSuccess)}</td>
+      </tr>
+    `;
+  }
+
+  html += `</tbody></table></div>`;
+  document.getElementById("reportTable").innerHTML = html;
+}
+</script>
+</body>
+</html>
